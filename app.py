@@ -10,94 +10,125 @@ from linebot.models import TextSendMessage, MessageEvent, TextMessage
 
 app = Flask(__name__)
 
-# 從環境變數讀取金鑰
+# 設定金鑰
 line_bot_api = LineBotApi(os.environ.get('LINE_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.environ.get('LINE_CHANNEL_SECRET'))
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 
-# SMC 分析核心邏輯
+# 獲取股票名稱
+def get_stock_name(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.info.get('shortName', ticker)
+    except:
+        return ticker
+
+# SMC 深度分析核心
 def analyze_stock(stock_id):
     try:
-        # 1. 處理代號 (台股自動加 .TW)
+        # 1. 處理代號
         ticker = stock_id.upper()
         if re.match(r'^\d{4}$', ticker):
             ticker += '.TW'
         
-        # 2. 抓取數據
-        # 使用 auto_adjust=True 自動還原權息，讓 K 線更準
-        df = yf.download(ticker, period="60d", auto_adjust=True)
+        # 2. 抓取數據 (抓取 100 天以計算更長期的結構)
+        stock = yf.Ticker(ticker)
+        df = stock.history(period="100d")
         
         if df.empty:
-            return f"❌ 找不到 {ticker} 的數據，請確認代號是否正確。"
+            return f"❌ 找不到 {ticker}，請確認代號。"
 
-        # 【數據清洗】處理 yfinance 新版 MultiIndex 問題
-        # 避免出現 (Close, 2330.TW) 這種雙層標題導致錯誤
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        stock_name = get_stock_name(ticker)
 
-        # 確保有收盤價
-        if 'Close' not in df.columns:
-            if 'Adj Close' in df.columns:
-                df['Close'] = df['Adj Close']
-            else:
-                return "⚠️ 數據格式異常，無法讀取收盤價。"
+        # 3. 數據前處理
+        # 轉成列表方便取出最後幾根 K 線
+        closes = df['Close'].tolist()
+        highs = df['High'].tolist()
+        lows = df['Low'].tolist()
+        opens = df['Open'].tolist()
+        volumes = df['Volume'].tolist()
+        dates = df.index.strftime('%Y-%m-%d').tolist()
 
-        # 3. 計算技術指標
-        # 強制轉型 float，避免 numpy 格式造成 JSON 序列化錯誤
-        close = float(df['Close'].iloc[-1])
-        prev_close = float(df['Close'].iloc[-2])
-        change_pct = ((close - prev_close) / prev_close) * 100
+        # SMC 關鍵數據計算
+        current_price = closes[-1]
         
-        sma_20 = float(df['Close'].rolling(20).mean().iloc[-1])
-        sma_60 = float(df['Close'].rolling(60).mean().iloc[-1])
+        # 尋找近期流動性 (Liquidity Pool) - 近 20 日高低點
+        bsl = max(highs[-20:]) # Buy-Side Liquidity
+        ssl = min(lows[-20:])  # Sell-Side Liquidity
         
-        # RSI 計算
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        
-        if float(loss.iloc[-1]) == 0:
-            rsi = 100.0
-        else:
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs)).iloc[-1]
-        rsi = float(rsi)
+        # 判斷溢價/折價區 (Premium / Discount)
+        # 取近 60 日波段範圍
+        swing_high = max(highs[-60:])
+        swing_low = min(lows[-60:])
+        equilibrium = (swing_high + swing_low) / 2
+        pd_zone = "Premium (溢價區-找空點)" if current_price > equilibrium else "Discount (折價區-找買點)"
 
-        # 取得近期高低點 (尋找流動性)
-        high_20 = float(df['High'].tail(20).max())
-        low_20 = float(df['Low'].tail(20).min())
+        # 準備最近 5 天的 K 線數據字串 (讓 AI "看" 到 K 線型態)
+        # 格式: 日期 | 開 | 高 | 低 | 收 | 量
+        candles_str = ""
+        for i in range(-5, 0):
+            candles_str += f"- {dates[i]}: O={opens[i]:.1f}, H={highs[i]:.1f}, L={lows[i]:.1f}, C={closes[i]:.1f}, Vol={volumes[i]}\n"
 
-        # 4. 組裝 Prompt 給 Gemini
+        # 4. 建構 SMC 專用 Prompt (極度詳細)
         prompt = f"""
-        你現在是 SMC (Smart Money Concepts) 頂尖交易員。
+        你現在是 ICT (Inner Circle Trader) 與 SMC 策略的頂尖量化分析師。
         
-        【市場數據】
-        股票代號: {ticker}
-        現價: {close:.2f} (漲跌幅: {change_pct:.2f}%)
-        SMA20: {sma_20:.2f}
-        SMA60: {sma_60:.2f}
-        RSI(14): {rsi:.2f}
-        前波高點(近20日): {high_20:.2f}
-        前波低點(近20日): {low_20:.2f}
+        【資產概況】
+        標的: {stock_name} ({ticker})
+        現價: {current_price:.2f}
+        市場位階: {pd_zone} (50% 均衡點: {equilibrium:.2f})
+        近期流動性目標: 上方 BSL {bsl:.2f} / 下方 SSL {ssl:.2f}
 
-        【任務】
-        請用「SMC 機構訂單流」風格，撰寫約 150 字的短評。
-        1. 判斷趨勢 (基於 SMA 排列與 BOS)。
-        2. 尋找流動性 (Liquidity) 與 FVG 潛在區。
-        3. 給出操作建議 (做多/做空/觀望)。
-        4. 語氣要專業、冷靜。
+        【近 5 日價格行為 (Price Action)】
+        {candles_str}
+
+        【分析任務】
+        請根據上述「具體的 K 線數據」，進行嚴謹的 SMC 邏輯推演：
+
+        1. **識別訂單塊 (Order Block)**：
+           - 觀察最近是否有「吞噬型態」或「強勢突破前的反向 K 線」。
+           - 標出具體的 OB 價格範圍。
+
+        2. **識別價值缺口 (FVG / Imbalance)**：
+           - 觀察 K 線之間是否有未回補的缺口 (Gap) 或急漲急跌留下的流動性失衡。
+           - 標出 FVG 價格範圍。
+
+        3. **市場結構 (BOS / CHoCH)**：
+           - 判斷最近一次是突破前高 (BOS) 還是跌破前低 (CHoCH)？
+           - 目前是否發生流動性獵殺 (Liquidity Sweep)？(例如插針後收回)。
+
+        【輸出格式】
+        請直接輸出以下表格與結論 (不要廢話)：
+
+        ### 🦁 {stock_name} ({ticker}) SMC 機構視角
+
+        | 指標 | 狀態 | 關鍵價位 / 解讀 |
+        | :--- | :--- | :--- |
+        | **結構 (Structure)** | [多頭/空頭] | [BOS 或 CHoCH 發生位置] |
+        | **位階 (P/D Array)** | {pd_zone} | 均衡點 {equilibrium:.2f} |
+        | **動能 (Momentum)** | [強/弱] | [根據 K 線實體大小判斷] |
+
+        **🎯 機構足跡 (Smart Money Footprint)**
+        * **🧱 訂單塊 (OB)**: 觀察 [日期] 的 K 線，潛在支撐/壓力在 **[價格區間]**。
+        * **⚡ 價值缺口 (FVG)**: 留意 **[價格區間]** 的失衡區，等待回補。
+        * **🌊 流動性 (Liquidity)**: [上方/下方] 流動性目標為 **[價格]**。
+
+        **📝 操盤劇本 (Execution)**
+        > **方向**: [做多/做空/觀望]
+        * **進場觸發**: 等待價格回測 **[OB或FVG區域]** 且出現 [反轉訊號] 時入場。
+        * **失效防守**: 若收盤價越過 **[某個關鍵高低點]** 則分析失效。
         """
 
-        # 【關鍵修正】使用您帳號權限內的最新模型
+        # 使用 Gemini 2.5 Flash
         model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content(prompt)
         return response.text
 
     except Exception as e:
         print(f"Error: {e}")
-        return f"⚠️ 系統錯誤: {str(e)}"
+        return f"⚠️ 分析失敗: {str(e)}"
 
-# LINE Webhook 入口
+# Webhook 設定
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -111,17 +142,11 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
-    
-    # 寬鬆判斷，允許輸入代號 (例如 2330, TSLA, BTC-USD)
     if re.match(r'^[A-Za-z0-9.-]+$', user_msg):
         reply_text = analyze_stock(user_msg)
     else:
-        reply_text = "請輸入股票代號 (例如: 2330)"
-
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+        reply_text = "請輸入代號 (例如: 2330)"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 if __name__ == "__main__":
     app.run()
