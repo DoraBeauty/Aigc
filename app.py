@@ -5,11 +5,11 @@ import google.generativeai as genai
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import TextSendMessage
+from linebot.models import TextSendMessage, MessageEvent, TextMessage # <--- 修正這行
 
 app = Flask(__name__)
 
-# 從環境變數讀取金鑰 (等等在 Render 設定)
+# 從環境變數讀取金鑰
 line_bot_api = LineBotApi(os.environ.get('LINE_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.environ.get('LINE_CHANNEL_SECRET'))
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
@@ -17,17 +17,14 @@ genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 # SMC 分析核心邏輯
 def analyze_stock(stock_id):
     try:
-        # 1. 處理代號 (台股加 .TW)
         ticker = stock_id.upper()
-        if re.match(r'^\d{4}$', ticker): # 如果是4位數字
+        if re.match(r'^\d{4}$', ticker):
             ticker += '.TW'
         
-        # 2. 抓取數據 (yfinance)
         df = yf.download(ticker, period="60d")
         if df.empty:
             return "❌ 找不到此股票數據，請確認代號。"
         
-        # 3. 計算技術指標 (Python 硬運算)
         close = df['Close'].iloc[-1]
         prev_close = df['Close'].iloc[-2]
         change_pct = ((close - prev_close) / prev_close) * 100
@@ -35,14 +32,12 @@ def analyze_stock(stock_id):
         sma_20 = df['Close'].rolling(20).mean().iloc[-1]
         sma_60 = df['Close'].rolling(60).mean().iloc[-1]
         
-        # 簡單 RSI 計算
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
 
-        # 4. 組裝 Prompt 給 Gemini
         prompt = f"""
         你現在是 SMC (Smart Money Concepts) 頂尖交易員。
         
@@ -63,7 +58,6 @@ def analyze_stock(stock_id):
         4. 語氣要專業、冷靜。
         """
 
-        # 5. 呼叫 Gemini
         model = genai.GenerativeModel('gemini-pro')
         response = model.generate_content(prompt)
         return response.text
@@ -82,13 +76,13 @@ def callback():
         abort(400)
     return 'OK'
 
-# 處理訊息
+# 處理訊息 (這裡原本會報錯，因為 MessageEvent 沒被定義)
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
     
-    # 簡單判斷：如果是股票代號格式 (例如 2330 或 TSLA)
     if re.match(r'^[A-Za-z0-9]+$', user_msg):
+        # 為了避免 LINE timeout，先回覆一個「分析中...」可以更進階處理，但現在先直接跑
         reply_text = analyze_stock(user_msg)
     else:
         reply_text = "請輸入股票代號 (例如: 2330, 0050, TSLA)"
