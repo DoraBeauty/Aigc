@@ -23,27 +23,26 @@ def analyze_stock(stock_id):
         if re.match(r'^\d{4}$', ticker):
             ticker += '.TW'
         
-        # 2. 抓取數據 (加入 auto_adjust=True 簡化數據)
+        # 2. 抓取數據 (修正 yfinance 格式)
         print(f"正在抓取: {ticker}")
         df = yf.download(ticker, period="60d", auto_adjust=True)
         
         if df.empty:
             return f"❌ 找不到 {ticker} 的數據，請確認代號是否正確。"
 
-        # 【關鍵修正】處理 yfinance 新版 MultiIndex 問題
-        # 如果欄位是多層索引 (例如: ('Close', '2330.TW'))，強制扁平化
+        # 【清洗數據】處理 MultiIndex (避免格式錯誤)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 再次確認是否有 'Close' 欄位
+        # 確保有收盤價
         if 'Close' not in df.columns:
-             # 有時候叫 'Adj Close'
             if 'Adj Close' in df.columns:
                 df['Close'] = df['Adj Close']
             else:
-                return "⚠️ 數據格式異常，無法讀取收盤價。"
+                return "⚠️ 數據異常，無法讀取收盤價。"
 
-        # 3. 計算技術指標 (強制轉為 float 避免格式化錯誤)
+        # 3. 計算技術指標
+        # 強制轉型 float，避免 numpy/pandas 格式造成報錯
         close = float(df['Close'].iloc[-1])
         prev_close = float(df['Close'].iloc[-2])
         change_pct = ((close - prev_close) / prev_close) * 100
@@ -51,23 +50,24 @@ def analyze_stock(stock_id):
         sma_20 = float(df['Close'].rolling(20).mean().iloc[-1])
         sma_60 = float(df['Close'].rolling(60).mean().iloc[-1])
         
-        # 簡單 RSI 計算
+        # RSI 計算
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        # 避免分母為 0
-        if float(loss.iloc[-1]) == 0:
-            rsi = 100
+        
+        loss_val = float(loss.iloc[-1])
+        if loss_val == 0:
+            rsi = 100.0
         else:
+            rs = gain / loss
             rsi = 100 - (100 / (1 + rs)).iloc[-1]
         rsi = float(rsi)
 
-        # 取得高低點
+        # 高低點
         high_20 = float(df['High'].tail(20).max())
         low_20 = float(df['Low'].tail(20).min())
 
-        # 4. 組裝 Prompt 給 Gemini
+        # 4. 組裝 Prompt
         prompt = f"""
         你現在是 SMC (Smart Money Concepts) 頂尖交易員。
         
@@ -88,16 +88,16 @@ def analyze_stock(stock_id):
         4. 語氣要專業、冷靜。
         """
 
-        model = genai.GenerativeModel('gemini-pro')
+        # 【關鍵修正】這裡改用最新的 gemini-1.5-flash
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         return response.text
 
     except Exception as e:
-        # 印出錯誤到 Logs 以便除錯
         print(f"Error: {e}")
         return f"⚠️ 系統錯誤: {str(e)}"
 
-# LINE Webhook 入口
+# LINE Webhook
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -112,11 +112,11 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
     
-    # 寬鬆判斷，允許使用者輸入代號
+    # 允許代號輸入 (含數字與英文)
     if re.match(r'^[A-Za-z0-9.]+$', user_msg):
         reply_text = analyze_stock(user_msg)
     else:
-        reply_text = "請輸入股票代號 (例如: 2330, 0050, TSLA)"
+        reply_text = "請輸入股票代號 (例如: 2330, 0050)"
 
     line_bot_api.reply_message(
         event.reply_token,
