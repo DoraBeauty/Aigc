@@ -76,12 +76,28 @@ def analyze_stock(stock_id):
     try:
         # 處理代號
         ticker = stock_id.upper()
-        if re.match(r'^\d{4}$', ticker):
-            ticker += '.TW'
         
-        # 抓取數據 (100天)
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="100d")
+        # 判斷是否為 4 位數代號 (台灣股票)
+        if re.match(r'^\d{4}$', ticker):
+            # 優先嘗試 .TW (上市)
+            test_ticker = ticker + '.TW'
+            stock = yf.Ticker(test_ticker)
+            df = stock.history(period="100d")
+
+            if not df.empty:
+                ticker = test_ticker
+            else:
+                # 若無資料，嘗試 .TWO (上櫃)
+                test_ticker = ticker + '.TWO'
+                stock = yf.Ticker(test_ticker)
+                df = stock.history(period="100d")
+
+                if not df.empty:
+                    ticker = test_ticker
+        else:
+            # 非 4 位數代號 (如美股或其他輸入)，直接查詢
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="100d")
         
         if df.empty:
             return f"❌ 找不到股票代號: {ticker}"
