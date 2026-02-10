@@ -109,9 +109,37 @@ def analyze_stock(stock_id):
         """
 
         # 呼叫 AI
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        return response.text
+        # 優先嘗試使用者指定的 Gemma 3 系列模型 (Gemma 3 27B, 12B, 4B, 1B)
+        # 根據使用者提供的清單，將這些模型列為優先使用
+        model_list = [
+            'gemma-3-27b-it',
+            'gemma-3-12b-it',
+            'gemma-3-4b-it',
+            'gemma-3-1b-it',
+            # 備援模型：若上述 Gemma 3 模型暫時無法使用，嘗試以下模型以避免服務中斷
+            'gemini-2.0-flash-exp',
+            'gemini-1.5-flash-8b'
+        ]
+
+        last_error = None
+        for model_name in model_list:
+            try:
+                # 嘗試建立模型並生成內容
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+
+                # 若成功生成內容，直接回傳
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                # 若發生錯誤 (例如 Quota exceeded 或 Model not found)，記錄錯誤並嘗試下一個模型
+                error_msg = str(e)
+                last_error = error_msg
+                print(f"Model {model_name} failed: {error_msg}")
+                continue
+
+        # 若所有模型都失敗，回傳最後一個錯誤訊息
+        return f"⚠️ 系統異常 (所有模型皆忙碌或無法使用): {last_error}"
 
     except Exception as e:
         return f"⚠️ 系統異常: {str(e)}"
