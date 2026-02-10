@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import yfinance as yf
 import pandas as pd
 import google.generativeai as genai
@@ -23,32 +22,6 @@ def get_stock_name(ticker):
         return stock.info.get('shortName', ticker)
     except:
         return ticker
-
-# 呼叫 Gemini 的核心函數 (調整為高額度模型優先)
-def call_gemini_with_fallback(prompt):
-    # 優先順序調整：
-    # 1. gemini-2.0-flash (主力: 額度高、速度快)
-    # 2. gemini-flash-latest (備援: 指向當前最穩定的 Flash 版本)
-    # 3. gemini-pro-latest (最後防線)
-    model_priority = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest']
-    
-    error_log = [] # 記錄錯誤以便除錯
-
-    for model_name in model_priority:
-        try:
-            print(f"嘗試使用模型: {model_name} ...")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            error_msg = str(e)
-            print(f"⚠️ 模型 {model_name} 失敗: {error_msg}")
-            error_log.append(f"{model_name}: {error_msg}")
-            # 繼續嘗試下一個模型
-            continue
-    
-    # 如果全部失敗，回傳詳細錯誤給使用者
-    return f"⚠️ 系統忙碌 (所有模型皆額滿)。\n除錯紀錄:\n" + "\n".join(error_log)
 
 # SMC 深度分析核心
 def analyze_stock(stock_id):
@@ -76,7 +49,7 @@ def analyze_stock(stock_id):
 
         current_price = closes[-1]
         
-        # 流動性與位階計算
+        # SMC 數據計算
         bsl = max(highs[-20:]) 
         ssl = min(lows[-20:])
         swing_high = max(highs[-60:])
@@ -84,51 +57,54 @@ def analyze_stock(stock_id):
         equilibrium = (swing_high + swing_low) / 2
         pd_zone = "Premium (溢價區-找空點)" if current_price > equilibrium else "Discount (折價區-找買點)"
 
-        # K 線數據字串
+        # K 線數據字串 (給 AI 看型態)
         candles_str = ""
-        # 取最後 5 天
         for i in range(-5, 0):
             candles_str += f"- {dates[i]}: O={opens[i]:.1f}, H={highs[i]:.1f}, L={lows[i]:.1f}, C={closes[i]:.1f}\n"
 
-        # 4. Prompt
+        # 4. Prompt (針對 1.5 Flash 優化，讓它更聽話)
         prompt = f"""
-        你現在是 ICT (Inner Circle Trader) 與 SMC 策略的頂尖量化分析師。
+        你現在是 SMC (Smart Money Concepts) 專業交易員。
         
-        【資產概況】
+        【資產數據】
         標的: {stock_name} ({ticker})
         現價: {current_price:.2f}
-        位階: {pd_zone} (50% EQ: {equilibrium:.2f})
-        近期流動性: BSL {bsl:.2f} / SSL {ssl:.2f}
+        位階: {pd_zone} (EQ: {equilibrium:.2f})
+        近20日流動性: 上方BSL {bsl:.2f} / 下方SSL {ssl:.2f}
 
-        【近 5 日價格行為】
+        【近 5 日 K 線】
         {candles_str}
 
         【任務】
-        請根據 K 線數據進行 SMC 分析，並用以下 Markdown 表格輸出：
+        請直接用 Markdown 表格輸出分析 (不要廢話)：
 
-        ### 🦁 {stock_name} ({ticker}) SMC 機構視角
+        ### 🦁 {stock_name} ({ticker}) SMC 分析
 
-        | 指標 | 狀態 | 關鍵價位 / 解讀 |
+        | 項目 | 狀態 | 關鍵價位/解讀 |
         | :--- | :--- | :--- |
-        | **結構** | [多頭/空頭] | [BOS 或 CHoCH] |
+        | **結構** | [多頭/空頭] | [描述 BOS 或 CHoCH] |
+        | **動能** | [強/弱] | [根據 K 線實體判斷] |
         | **位階** | {pd_zone} | 均衡點 {equilibrium:.2f} |
-        | **動能** | [強/弱] | [K線實體力度] |
 
-        **🎯 機構足跡 (Smart Money)**
-        * **🧱 訂單塊 (OB)**: 觀察 [日期] K線，支撐/壓力在 **[價格區間]**。
-        * **⚡ 價值缺口 (FVG)**: 留意 **[價格區間]** 失衡。
-        * **🌊 流動性**: [上方/下方] 目標 **[價格]**。
+        **🎯 關鍵區域 (POI)**
+        * **🧱 訂單塊 (OB)**: 關注 **[價格區間]** (支撐/壓力)。
+        * **⚡ 缺口 (FVG)**: 關注 **[價格區間]** (失衡區)。
+        * **🌊 流動性**: 目標 **[價格]**。
 
-        **📝 操盤劇本**
+        **📝 操盤建議**
         > **方向**: [做多/做空/觀望]
-        * **進場**: 回測 **[OB/FVG]** 且 [反轉訊號] 時入場。
-        * **防守**: 收盤跌破 **[價格]** 則失效。
+        * **進場**: 回測 **[POI]** 且出現反轉訊號時。
+        * **止損**: 收盤跌破/突破 **[價格]**。
         """
 
-        return call_gemini_with_fallback(prompt)
+        # 【關鍵】使用 gemini-1.5-flash (最穩定、額度最高)
+        # 只要步驟一的 requirements.txt 有更新，這裡絕對不會 404
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return response.text
 
     except Exception as e:
-        print(f"Error: {e}")
+        # 如果還是錯，印出詳細原因
         return f"⚠️ 分析失敗: {str(e)}"
 
 # Webhook 設定
