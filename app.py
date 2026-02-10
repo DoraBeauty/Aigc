@@ -19,11 +19,13 @@ genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 def get_stock_name(ticker):
     try:
         stock = yf.Ticker(ticker)
-        return stock.info.get('shortName', ticker)
+        # 優先抓取中文名稱，抓不到再抓英文
+        info = stock.info
+        return info.get('longName') or info.get('shortName') or ticker
     except:
         return ticker
 
-# SMC 深度分析核心
+# SMC 分析核心
 def analyze_stock(stock_id):
     try:
         # 1. 處理代號
@@ -40,71 +42,53 @@ def analyze_stock(stock_id):
 
         stock_name = get_stock_name(ticker)
 
-        # 3. 數據前處理
+        # 3. 數據計算 (SMC 邏輯)
         closes = df['Close'].tolist()
         highs = df['High'].tolist()
         lows = df['Low'].tolist()
         opens = df['Open'].tolist()
         dates = df.index.strftime('%Y-%m-%d').tolist()
 
-        current_price = closes[-1]
+        current_price = float(closes[-1])
+        change_pct = ((current_price - float(closes[-2])) / float(closes[-2])) * 100
         
-        # SMC 數據計算
+        # 流動性高低點
         bsl = max(highs[-20:]) 
         ssl = min(lows[-20:])
+        
+        # P/D Zone (溢價/折價區)
         swing_high = max(highs[-60:])
         swing_low = min(lows[-60:])
         equilibrium = (swing_high + swing_low) / 2
-        pd_zone = "Premium (溢價區-找空點)" if current_price > equilibrium else "Discount (折價區-找買點)"
+        pd_zone = "Premium (溢價區)" if current_price > equilibrium else "Discount (折價區)"
 
-        # K 線數據字串 (給 AI 看型態)
+        # K線型態
         candles_str = ""
         for i in range(-5, 0):
             candles_str += f"- {dates[i]}: O={opens[i]:.1f}, H={highs[i]:.1f}, L={lows[i]:.1f}, C={closes[i]:.1f}\n"
 
-        # 4. Prompt (針對 1.5 Flash 優化，讓它更聽話)
+        # 4. 深度 SMC Prompt
         prompt = f"""
-        你現在是 SMC (Smart Money Concepts) 專業交易員。
-        
-        【資產數據】
+        你現在是 SMC (Smart Money Concepts) 頂尖量化操盤手。
         標的: {stock_name} ({ticker})
-        現價: {current_price:.2f}
+        現價: {current_price:.2f} ({change_pct:.2f}%)
         位階: {pd_zone} (EQ: {equilibrium:.2f})
-        近20日流動性: 上方BSL {bsl:.2f} / 下方SSL {ssl:.2f}
+        近期流動性: 上方 BSL {bsl:.2f} / 下方 SSL {ssl:.2f}
 
-        【近 5 日 K 線】
+        【近 5 日 K 線數據】
         {candles_str}
 
-        【任務】
-        請直接用 Markdown 表格輸出分析 (不要廢話)：
-
-        ### 🦁 {stock_name} ({ticker}) SMC 分析
-
-        | 項目 | 狀態 | 關鍵價位/解讀 |
-        | :--- | :--- | :--- |
-        | **結構** | [多頭/空頭] | [描述 BOS 或 CHoCH] |
-        | **動能** | [強/弱] | [根據 K 線實體判斷] |
-        | **位階** | {pd_zone} | 均衡點 {equilibrium:.2f} |
-
-        **🎯 關鍵區域 (POI)**
-        * **🧱 訂單塊 (OB)**: 關注 **[價格區間]** (支撐/壓力)。
-        * **⚡ 缺口 (FVG)**: 關注 **[價格區間]** (失衡區)。
-        * **🌊 流動性**: 目標 **[價格]**。
-
-        **📝 操盤建議**
-        > **方向**: [做多/做空/觀望]
-        * **進場**: 回測 **[POI]** 且出現反轉訊號時。
-        * **止損**: 收盤跌破/突破 **[價格]**。
+        任務: 請根據 K 線型態(如實體大小、影線)與位階，給出專業 SMC 分析。
+        請用 Markdown 表格格式輸出，包含「結構、位階、動能」，並明確標出建議觀察的「訂單塊(OB)」與「價值缺口(FVG)」價格區間。
+        最後給出進場建議與失效點位。
         """
 
-        # 【關鍵】使用 gemini-1.5-flash (最穩定、額度最高)
-        # 只要步驟一的 requirements.txt 有更新，這裡絕對不會 404
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 【關鍵修正】使用你清單中明確存在的 gemini-flash-latest
+        model = genai.GenerativeModel('gemini-flash-latest')
         response = model.generate_content(prompt)
         return response.text
 
     except Exception as e:
-        # 如果還是錯，印出詳細原因
         return f"⚠️ 分析失敗: {str(e)}"
 
 # Webhook 設定
