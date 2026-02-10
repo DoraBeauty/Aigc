@@ -24,11 +24,16 @@ def get_stock_name(ticker):
     except:
         return ticker
 
-# 呼叫 Gemini 的核心函數 (含自動重試與降級機制)
+# 呼叫 Gemini 的核心函數 (調整為高額度模型優先)
 def call_gemini_with_fallback(prompt):
-    # 優先順序：最新版 -> 穩定版 -> 輕量版
-    model_priority = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+    # 優先順序調整：
+    # 1. gemini-2.0-flash (主力: 額度高、速度快)
+    # 2. gemini-flash-latest (備援: 指向當前最穩定的 Flash 版本)
+    # 3. gemini-pro-latest (最後防線)
+    model_priority = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest']
     
+    error_log = [] # 記錄錯誤以便除錯
+
     for model_name in model_priority:
         try:
             print(f"嘗試使用模型: {model_name} ...")
@@ -37,15 +42,13 @@ def call_gemini_with_fallback(prompt):
             return response.text
         except Exception as e:
             error_msg = str(e)
-            # 如果是 429 (Quota exceeded) 或 404 (Not Found)，嘗試下一個模型
-            if "429" in error_msg or "Quota" in error_msg or "404" in error_msg:
-                print(f"⚠️ 模型 {model_name} 不可用 ({error_msg})，切換至備援模型...")
-                continue # 繼續迴圈，試下一個
-            else:
-                # 其他錯誤 (如內容違規) 則直接拋出
-                raise e
+            print(f"⚠️ 模型 {model_name} 失敗: {error_msg}")
+            error_log.append(f"{model_name}: {error_msg}")
+            # 繼續嘗試下一個模型
+            continue
     
-    return "⚠️ 所有 AI 模型目前皆無法使用 (配額耗盡或系統忙碌)。"
+    # 如果全部失敗，回傳詳細錯誤給使用者
+    return f"⚠️ 系統忙碌 (所有模型皆額滿)。\n除錯紀錄:\n" + "\n".join(error_log)
 
 # SMC 深度分析核心
 def analyze_stock(stock_id):
@@ -83,6 +86,7 @@ def analyze_stock(stock_id):
 
         # K 線數據字串
         candles_str = ""
+        # 取最後 5 天
         for i in range(-5, 0):
             candles_str += f"- {dates[i]}: O={opens[i]:.1f}, H={highs[i]:.1f}, L={lows[i]:.1f}, C={closes[i]:.1f}\n"
 
@@ -121,7 +125,6 @@ def analyze_stock(stock_id):
         * **防守**: 收盤跌破 **[價格]** 則失效。
         """
 
-        # 呼叫自動切換模型的函數
         return call_gemini_with_fallback(prompt)
 
     except Exception as e:
