@@ -109,7 +109,7 @@ def analyze_stock(stock_id):
         """
 
         # 呼叫 AI
-        model = genai.GenerativeModel('gemini-flash-latest')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         return response.text
 
@@ -137,4 +137,5 @@ def handle_message(event):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
