@@ -62,8 +62,27 @@ def get_stock_news(ticker):
         count = 0
         for item in news:
             if count >= 3: break # 只取前 3 則
-            title = item.get('title', '')
-            link = item.get('link', '')
+
+            # Try new structure first
+            content = item.get('content', {})
+            title = content.get('title')
+
+            link = None
+            if content:
+                click_through = content.get('clickThroughUrl')
+                if click_through:
+                    link = click_through.get('url')
+                if not link:
+                    canonical = content.get('canonicalUrl')
+                    if canonical:
+                        link = canonical.get('url')
+
+            # Fallback to old structure
+            if not title:
+                title = item.get('title', '')
+            if not link:
+                link = item.get('link', '')
+
             # 簡單過濾非中文新聞 (如果需要) - 這裡暫時全抓，讓 AI 翻譯/解讀
             news_summary += f"- {title} ({link})\n"
             count += 1
