@@ -34,11 +34,16 @@ def get_market_data():
         tickers = ['^VIX', '^TNX', '^GSPC', '^TWII']
         data = yf.download(tickers, period="5d", progress=False)['Close']
 
-        # 取得最新一筆非空值數據
-        last_vix = data['^VIX'].iloc[-1] if '^VIX' in data else 0
-        last_tnx = data['^TNX'].iloc[-1] if '^TNX' in data else 0
-        last_gspc = data['^GSPC'].iloc[-1] if '^GSPC' in data else 0
-        last_twii = data['^TWII'].iloc[-1] if '^TWII' in data else 0
+        # 取得最新一筆非空值數據 (針對每個 ticker 獨立取最後一筆有效值)
+        def get_last_valid(ticker):
+            if ticker in data and not data[ticker].dropna().empty:
+                return data[ticker].dropna().iloc[-1]
+            return 0
+
+        last_vix = get_last_valid('^VIX')
+        last_tnx = get_last_valid('^TNX')
+        last_gspc = get_last_valid('^GSPC')
+        last_twii = get_last_valid('^TWII')
 
         return {
             "vix": f"{last_vix:.2f}",
